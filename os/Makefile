@@ -12,7 +12,7 @@ endif
 
 # BOARD
 BOARD := qemu
-SBI ?= rustsbi
+SBI ?= opensbi
 BOOTLOADER := ../bootloader/$(SBI)-$(BOARD).bin
 
 # KERNEL ENTRY
