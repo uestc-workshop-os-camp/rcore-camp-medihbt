@@ -7,7 +7,7 @@ DISASM_TMP := target/$(TARGET)/$(MODE)/asm
 
 # BOARD
 BOARD := qemu
-SBI ?= rustsbi
+SBI ?= opensbi
 BOOTLOADER := ../bootloader/$(SBI)-$(BOARD).bin
 
 # Building mode argument
