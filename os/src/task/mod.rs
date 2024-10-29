@@ -17,6 +17,7 @@ mod task;
 use crate::config::MAX_APP_NUM;
 use crate::loader::{get_num_app, init_app_cx};
 use crate::sync::UPSafeCell;
+use crate::timer;
 use lazy_static::*;
 use switch::__switch;
 pub use task::{TaskControlBlock, TaskStatus};
@@ -37,6 +38,8 @@ pub struct TaskManager {
     num_app: usize,
     /// use inner value to get mutable access
     inner: UPSafeCell<TaskManagerInner>,
+    /// use timer value to get timer access
+    timer: UPSafeCell<TaskManagerTimer>,
 }
 
 /// Inner of Task Manager
@@ -47,14 +50,17 @@ pub struct TaskManagerInner {
     current_task: usize,
 }
 
+/// Timer value of Task Maneger
+pub struct TaskManagerTimer {
+    /// Time utilities
+    timer_stopwatch: usize,
+}
+
 lazy_static! {
     /// Global variable: TASK_MANAGER
     pub static ref TASK_MANAGER: TaskManager = {
         let num_app = get_num_app();
-        let mut tasks = [TaskControlBlock {
-            task_cx: TaskContext::zero_init(),
-            task_status: TaskStatus::UnInit,
-        }; MAX_APP_NUM];
+        let mut tasks = [TaskControlBlock::empty(); MAX_APP_NUM];
         for (i, task) in tasks.iter_mut().enumerate() {
             task.task_cx = TaskContext::goto_restore(init_app_cx(i));
             task.task_status = TaskStatus::Ready;
@@ -65,6 +71,11 @@ lazy_static! {
                 UPSafeCell::new(TaskManagerInner {
                     tasks,
                     current_task: 0,
+                })
+            },
+            timer: unsafe {
+                UPSafeCell::new(TaskManagerTimer {
+                    timer_stopwatch: timer::get_time()
                 })
             },
         }
@@ -95,6 +106,9 @@ impl TaskManager {
         let mut inner = self.inner.exclusive_access();
         let current = inner.current_task;
         inner.tasks[current].task_status = TaskStatus::Ready;
+        // Now this task is suspended, which means time no longer belongs to
+        // kernel time of this task.
+        inner.tasks[current].update_kernel_time();
     }
 
     /// Change the status of current `Running` task into `Exited`.
@@ -123,10 +137,16 @@ impl TaskManager {
             let current = inner.current_task;
             inner.tasks[next].task_status = TaskStatus::Running;
             inner.current_task = next;
+            if inner.tasks[next].startup_time == 0 {
+                info!("next task {} first run at time {}", next, timer::get_time());
+                inner.tasks[next].startup_time = timer::get_time_ms();
+            }
             let current_task_cx_ptr = &mut inner.tasks[current].task_cx as *mut TaskContext;
             let next_task_cx_ptr = &inner.tasks[next].task_cx as *const TaskContext;
             drop(inner);
             // before this, we should drop local variables that must be dropped manually
+            // Also update timer because time turns back to applications
+            self.timer.exclusive_access().timer_stopwatch = timer::get_time();
             unsafe {
                 __switch(current_task_cx_ptr, next_task_cx_ptr);
             }
@@ -134,6 +154,47 @@ impl TaskManager {
         } else {
             panic!("All applications completed!");
         }
+    }
+
+    /// Get current task ID
+    pub fn get_current_task_id(&self) -> usize {
+        self.inner.exclusive_access().current_task
+    }
+
+    /// get current TCB
+    pub unsafe fn get_current_tcb(&self) -> *const TaskControlBlock {
+        let inner = self.inner.exclusive_access();
+        let ref_cur = &inner.tasks[inner.current_task];
+        core::ptr::from_ref(ref_cur)
+    }
+
+    /// update TCB
+    pub fn update_tcb<HandlerT>(&self, task_id: usize, update_handle: HandlerT)
+        where HandlerT: Fn(usize, &mut TaskControlBlock) -> () {
+        let mut inner = self.inner.exclusive_access();
+        update_handle(task_id, &mut inner.tasks[task_id]);
+    }
+
+    /// update current TCB
+    pub fn update_current_tcb<HandlerT>(&self, update_handle: HandlerT)
+        where HandlerT: Fn(usize, &mut TaskControlBlock) -> () {
+        let mut inner = self.inner.exclusive_access();
+        let task_id = inner.current_task;
+        update_handle(task_id, &mut inner.tasks[task_id]);
+    }
+
+    /// get time since stopwatch last saved
+    pub fn get_stopwatch_dt(&self) -> usize {
+        timer::get_time() - self.timer.exclusive_access().timer_stopwatch
+    }
+
+    /// reset stopwatch and get time since it last saved
+    pub fn stopwatch_reboot_get_dt(&self) -> usize {
+        let mut timer = self.timer.exclusive_access();
+        let time = timer::get_time();
+        let ret = time - timer.timer_stopwatch;
+        timer.timer_stopwatch = time;
+        ret
     }
 }
 
