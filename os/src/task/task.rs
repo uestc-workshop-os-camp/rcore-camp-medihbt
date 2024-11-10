@@ -37,6 +37,7 @@ impl TaskControlBlock {
     }
 }
 
+/// Inner TCB, which contains inner mutability in a readonly TCB reference.
 pub struct TaskControlBlockInner {
     /// The physical page number of the frame where the trap context is placed
     pub trap_cx_ppn: PhysPageNum,
@@ -72,6 +73,9 @@ pub struct TaskControlBlockInner {
 
     /// Task statistics
     pub statistics: TcbStatistics,
+
+    /// Task scheduling infomation
+    pub sched_info: SchedInfo,
 }
 
 impl TaskControlBlockInner {
@@ -86,18 +90,112 @@ impl TaskControlBlockInner {
     fn get_status(&self) -> TaskStatus {
         self.task_status
     }
+    /// Check if a task is zombie.
     pub fn is_zombie(&self) -> bool {
         self.get_status() == TaskStatus::Zombie
     }
 }
 
 #[derive(Clone, Copy)]
+/// Task runtime statistics infomation.
 pub struct TcbStatistics {
     /// Startup Time
     pub startup_time: usize,
 
     /// Syscall Infomation
     pub syscall_times: [u32; MAX_SYSCALL_NUM],
+}
+
+#[derive(Clone, Copy)]
+/// Data related to stride scheduling algorithm
+pub struct SchedInfo {
+    /// Priority
+    _priority: usize,
+
+    /// Pass (equals to STRIDE_BASE / priority)
+    _pass:     usize,
+
+    /// Current stride
+    _stride:   usize,
+}
+
+impl SchedInfo {
+    /// default priority
+    pub const DEFAULT_PRIORITY:  usize  = 16;
+
+    /// default pass
+    pub const DEFAULT_PASS_BASE: usize = 65537;
+
+    /// default pass, like DEFAULT_PASS_BASE / DEFAULT_PRIORITY.
+    pub const DEFAULT_PASS:      usize = 4096;
+
+    /// New SchedInfo instance for new process.
+    pub fn new()-> Self {
+        Self {
+            _priority: Self::DEFAULT_PRIORITY,
+            _pass:     Self::DEFAULT_PASS,
+            _stride: 0,
+        }
+    }
+
+    /// New SchedInfo instance for new process, with priority `prio`.
+    pub fn with_priority(prio: usize)-> Self {
+        Self {
+            _priority: prio,
+            // Most of prioroties are running in DEFAULT_PRIORITY,
+            // use this selection to decrease dividing
+            _pass: if prio == Self::DEFAULT_PRIORITY {
+                    Self::DEFAULT_PASS
+                } else {
+                    Self::DEFAULT_PASS_BASE / prio
+                },
+            _stride: 0
+        }
+    }
+
+    /// Used in fork(): clone a schedinfo from parent process
+    pub fn clone_from(old_sched_info: &Self)-> Self {
+        Self {
+            _priority: old_sched_info._priority,
+            _pass:     old_sched_info._pass,
+            _stride:   0
+        }
+    }
+
+    /// Reset schedule infomation. This is triggered when calling exec().
+    pub fn full_reset(&mut self) {
+        *self = Self::new()
+    }
+
+    /// Trivial getter: stride
+    pub fn get_stride(&self)-> usize { self._stride }
+    /// Reset: stride
+    pub fn reset_stride(&mut self)-> &mut Self {
+        self._stride = 0; self
+    }
+
+    /// Trivial getter: pass
+    pub fn get_pass(&self)-> usize { self._pass }
+
+    /// Trivial getter: priority
+    pub fn get_priority(&self)-> usize { self._priority }
+    /// Setter: priority
+    ///
+    /// This updates `_pass` field
+    pub fn set_priority(&mut self, priority: usize)-> &mut Self {
+        self._priority = priority;
+        self._pass = match priority {
+            Self::DEFAULT_PRIORITY => Self::DEFAULT_PASS,
+            _ => Self::DEFAULT_PASS_BASE / priority,
+        };
+        self
+    }
+
+    /// Update schedule infomation on process run
+    pub fn update(&mut self, dtime: usize)-> &mut Self {
+        self._stride += self._pass as usize * dtime;
+        self
+    }
 }
 
 impl TcbStatistics {
@@ -165,6 +263,7 @@ impl TaskControlBlock {
                     heap_bottom: user_sp,
                     program_brk: user_sp,
                     statistics:  TcbStatistics::empty(),
+                    sched_info:  SchedInfo::new(),
                 })
             },
         };
@@ -197,6 +296,10 @@ impl TaskControlBlock {
         inner.trap_cx_ppn = trap_cx_ppn;
         // initialize base_size
         inner.base_size = user_sp;
+        // reset statistics data
+        inner.statistics.on_exec();
+        // reset schedule data
+        inner.sched_info.full_reset();
         // initialize trap_cx
         let trap_cx = inner.get_trap_cx();
         *trap_cx = TrapContext::app_init_context(
@@ -239,6 +342,7 @@ impl TaskControlBlock {
                     heap_bottom: parent_inner.heap_bottom,
                     program_brk: parent_inner.program_brk,
                     statistics:  TcbStatistics::empty(),
+                    sched_info:  SchedInfo::clone_from(&parent_inner.sched_info),
                 })
             },
         });
@@ -252,6 +356,14 @@ impl TaskControlBlock {
         task_control_block
         // **** release child PCB
         // ---- release parent PCB
+    }
+
+    /// spawn a new process with elf data `app_elf`
+    pub fn spawn(self: Arc<Self>, app_elf: &[u8])-> Arc<Self> {
+        let ret = Arc::new(Self::new(app_elf));
+        ret.inner_exclusive_access().parent = Some(Arc::downgrade(&self));
+        self.inner_exclusive_access().children.push(ret.clone());
+        ret
     }
 
     /// get pid of process
@@ -283,6 +395,14 @@ impl TaskControlBlock {
         } else {
             None
         }
+    }
+
+    /// React on activation of this process. This method sets task status to
+    /// `Running` and updates scheduling info.
+    pub fn on_activate(&self)-> &Self {
+        let mut inner = self.inner_exclusive_access();
+        inner.task_status = TaskStatus::Running;
+        self
     }
 }
 

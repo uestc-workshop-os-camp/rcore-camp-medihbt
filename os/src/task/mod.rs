@@ -19,13 +19,16 @@ mod manager;
 mod processor;
 mod switch;
 #[allow(clippy::module_inception)]
-mod task;
+pub mod task;
+
+use core::ops::DerefMut;
 
 use crate::loader::get_app_data_by_name;
 use alloc::sync::Arc;
 use lazy_static::*;
 pub use manager::{fetch_task, TaskManager};
 use switch::__switch;
+use task::TaskControlBlockInner;
 pub use task::{TaskControlBlock, TaskStatus};
 
 pub use context::TaskContext;
@@ -99,6 +102,33 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     // we do not have to save task context
     let mut _unused = TaskContext::zero_init();
     schedule(&mut _unused as *mut _);
+}
+
+/// Read current TCB with function readf().
+pub fn read_current_tcb<T, RetT>(readf: &mut T)-> RetT
+    where T: FnMut(&PidHandle, &TaskControlBlockInner)-> RetT {
+    let tcb = current_task().unwrap();
+    trace!("Process {} borrowed itself", tcb.pid.0);
+    let rtcb = tcb.inner_exclusive_access();
+    let ret = readf(&tcb.pid, rtcb.deref());
+    trace!("Process {} released itself", tcb.pid.0);
+    ret
+}
+
+/// Get current PID
+pub fn get_current_pid()-> usize {
+    current_task().unwrap().getpid()
+}
+
+/// Update current TCB with function updatef().
+pub fn update_current_tcb<T, RetT>(updatef: &mut T)-> RetT
+    where T: FnMut(&PidHandle, &mut TaskControlBlockInner)-> RetT {
+    let tcb = current_task().unwrap();
+    trace!("Process {} borrowed itself (mut)", tcb.pid.0);
+    let mut rtcb = tcb.inner_exclusive_access();
+    let ret = updatef(&tcb.pid, rtcb.deref_mut());
+    trace!("Process {} released itself (mut)", tcb.pid.0);
+    ret
 }
 
 lazy_static! {
