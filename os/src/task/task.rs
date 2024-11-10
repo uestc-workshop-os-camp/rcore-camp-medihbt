@@ -359,7 +359,7 @@ impl TaskControlBlock {
     }
 
     /// spawn a new process with elf data `app_elf`
-    pub fn spawn(self: Arc<Self>, app_elf: &[u8])-> Arc<Self> {
+    pub fn spawn(self: &Arc<Self>, app_elf: &[u8])-> Arc<Self> {
         let ret = Arc::new(Self::new(app_elf));
         ret.inner_exclusive_access().parent = Some(Arc::downgrade(&self));
         self.inner_exclusive_access().children.push(ret.clone());
