@@ -78,7 +78,7 @@ impl TaskManager {
     fn run_first_task(&self) -> ! {
         let mut inner = self.inner.exclusive_access();
         let next_task = &mut inner.tasks[0];
-        next_task.task_status = TaskStatus::Running;
+        next_task.on_start();
         let next_task_cx_ptr = &next_task.task_cx as *const TaskContext;
         drop(inner);
         let mut _unused = TaskContext::zero_init();
@@ -139,7 +139,7 @@ impl TaskManager {
         if let Some(next) = self.find_next_task() {
             let mut inner = self.inner.exclusive_access();
             let current = inner.current_task;
-            inner.tasks[next].task_status = TaskStatus::Running;
+            inner.tasks[next].on_start();
             inner.current_task = next;
             let current_task_cx_ptr = &mut inner.tasks[current].task_cx as *mut TaskContext;
             let next_task_cx_ptr = &inner.tasks[next].task_cx as *const TaskContext;
@@ -152,6 +152,22 @@ impl TaskManager {
         } else {
             panic!("All applications completed!");
         }
+    }
+
+    /// Read data from current TCB
+    pub fn read_current_tcb<T>(&self, readf: &mut T)
+        where T: FnMut(usize, &TaskControlBlock) {
+        let tid = self.inner.exclusive_access().current_task;
+        let tcb = &self.inner.exclusive_access().tasks[tid];
+        readf(tid, tcb);
+    }
+
+    /// Update data on current TCB
+    pub fn update_current_tcb<T>(&self, readf: &mut T)
+        where T: FnMut(usize, &mut TaskControlBlock) {
+        let tid = self.inner.exclusive_access().current_task;
+        let tcb = &mut self.inner.exclusive_access().tasks[tid];
+        readf(tid, tcb);
     }
 }
 
@@ -201,4 +217,17 @@ pub fn current_trap_cx() -> &'static mut TrapContext {
 /// Change the current 'Running' task's program break
 pub fn change_program_brk(size: i32) -> Option<usize> {
     TASK_MANAGER.change_current_program_brk(size)
+}
+
+/// Read current TCB data using function readf.
+pub fn read_current_tcb<T>(mut readf: T)
+    where T: FnMut(usize, &TaskControlBlock) {
+    TASK_MANAGER.read_current_tcb(&mut readf);
+}
+
+/// Update current TCB data using function readf.
+/// NOTE: TCB data has been locked so you cannot use exclusive_access() again.
+pub fn update_current_tcb<T>(mut readf: T)
+    where T: FnMut(usize, &mut TaskControlBlock) {
+    TASK_MANAGER.update_current_tcb(&mut readf);
 }

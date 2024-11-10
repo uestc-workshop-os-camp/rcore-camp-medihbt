@@ -125,6 +125,17 @@ impl PageTable {
         }
         result
     }
+
+    /// Check if a virtual page number is inside a page map.
+    #[allow(unused)]
+    pub fn has_vpn(&self, vpn: VirtPageNum)-> bool {
+        if let Some(pte) = self.find_pte(vpn) {
+            pte.is_valid()
+        } else {
+            false
+        }
+    }
+
     /// set the map between virtual page number and physical page number
     #[allow(unused)]
     pub fn map(&mut self, vpn: VirtPageNum, ppn: PhysPageNum, flags: PTEFlags) {

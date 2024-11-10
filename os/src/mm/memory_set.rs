@@ -51,6 +51,10 @@ impl MemorySet {
     pub fn token(&self) -> usize {
         self.page_table.token()
     }
+    /// Check if a virtual page is mapped inside this
+    pub fn has_vpn(&self, vpn: VirtPageNum)-> bool {
+        self.page_table.has_vpn(vpn)
+    }
     /// Assume that no conflicts.
     pub fn insert_framed_area(
         &mut self,
@@ -244,6 +248,55 @@ impl MemorySet {
             area.shrink_to(&mut self.page_table, new_end.ceil());
             true
         } else {
+            false
+        }
+    }
+
+    /// shrink the area to [new_start, end]
+    pub fn unmap_range(&mut self, pbegin: VirtPageNum, npages: usize)-> bool {
+        let mut idx: usize = 0;
+        if let Some(area) = self
+            .areas
+            .iter_mut()
+            .find(|area| {
+                if area.vpn_range.get_start() == pbegin {
+                    true
+                } else {
+                    idx += 1; false
+                }
+            })
+        {
+            let vpn_start = area.vpn_range.get_start();
+            let vpn_end   = area.vpn_range.get_end();
+            let delta_npages = vpn_end.sub(&vpn_start);
+
+            // Prevent if vpn_end is smaller than vpn_start, which is horrible.
+            assert!(delta_npages > 0);
+            let delta_npages = delta_npages as usize;
+
+            if delta_npages == npages {
+                // Means deleting this map area.
+                let mut area = self.areas.remove(idx);
+                area.unmap(&mut self.page_table);
+            } else if delta_npages > npages {
+                // Means shrinking this map area rightwards (to [pbegin + npages, vpn_end]).
+                let new_pbegin = pbegin.add(npages);
+                let vpn_range = VPNRange::new(new_pbegin, vpn_end);
+                let wasted = VPNRange::new(pbegin, new_pbegin);
+                for vp in wasted {
+                    area.unmap_one(&mut self.page_table, vp);
+                }
+                area.vpn_range = vpn_range;
+            } else {
+                // Means page number overflow, do nothing and return an error
+                warn!("Page overflow: VPN range 0x{:012x}[..0x{:08x}] out of size {:08x}",
+                      pbegin.0, npages, delta_npages);
+                return false;
+            }
+            true
+        } else {
+            warn!("Page range not found: 0x{:012x}[..0x{:08x}] not in memory set",
+                pbegin.0, npages);
             false
         }
     }

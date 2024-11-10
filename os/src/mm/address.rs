@@ -166,6 +166,16 @@ impl VirtPageNum {
         }
         idx
     }
+
+    /// Get `npages` pages after this virtual page
+    pub fn add(&self, npages: usize)-> Self {
+        Self(self.0 + npages)
+    }
+
+    /// Get distance (in pages) between two pages.
+    pub fn sub(&self, rhs: &Self)-> isize {
+        (self.0 as isize) - (rhs.0 as isize)
+    }
 }
 
 impl PhysAddr {
