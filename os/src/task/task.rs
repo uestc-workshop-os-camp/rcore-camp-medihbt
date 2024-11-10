@@ -1,9 +1,10 @@
 //! Types related to task management & Functions for completely changing TCB
 use super::TaskContext;
 use super::{kstack_alloc, pid_alloc, KernelStack, PidHandle};
-use crate::config::TRAP_CONTEXT_BASE;
+use crate::config::{MAX_SYSCALL_NUM, TRAP_CONTEXT_BASE};
 use crate::mm::{MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE};
 use crate::sync::UPSafeCell;
+use crate::timer;
 use crate::trap::{trap_handler, TrapContext};
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
@@ -68,6 +69,9 @@ pub struct TaskControlBlockInner {
 
     /// Program break
     pub program_brk: usize,
+
+    /// Task statistics
+    pub statistics: TcbStatistics,
 }
 
 impl TaskControlBlockInner {
@@ -84,6 +88,48 @@ impl TaskControlBlockInner {
     }
     pub fn is_zombie(&self) -> bool {
         self.get_status() == TaskStatus::Zombie
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct TcbStatistics {
+    /// Startup Time
+    pub startup_time: usize,
+
+    /// Syscall Infomation
+    pub syscall_times: [u32; MAX_SYSCALL_NUM],
+}
+
+impl TcbStatistics {
+    /// Create an enpty task statistics item
+    pub fn empty()-> Self {
+        Self {
+            startup_time: 0,
+            syscall_times: [0; MAX_SYSCALL_NUM]
+        }
+    }
+
+    /// React on process startup
+    pub fn on_activate(&mut self) {
+        if self.startup_time == 0 {
+            self.startup_time = timer::get_time();
+        }
+    }
+
+    /// React on syscall
+    pub fn on_syscall(&mut self, syscall_id: usize) {
+        self.syscall_times[syscall_id] += 1;
+    }
+
+    /// Reset this
+    pub fn reset(&mut self) {
+        self.startup_time  = 0;
+        self.syscall_times = [0; MAX_SYSCALL_NUM];
+    }
+
+    /// React on executing this
+    pub fn on_exec(&mut self) {
+        self.reset();
     }
 }
 
@@ -118,6 +164,7 @@ impl TaskControlBlock {
                     exit_code: 0,
                     heap_bottom: user_sp,
                     program_brk: user_sp,
+                    statistics:  TcbStatistics::empty(),
                 })
             },
         };
@@ -191,6 +238,7 @@ impl TaskControlBlock {
                     exit_code: 0,
                     heap_bottom: parent_inner.heap_bottom,
                     program_brk: parent_inner.program_brk,
+                    statistics:  TcbStatistics::empty(),
                 })
             },
         });
