@@ -8,7 +8,7 @@ use crate::timer;
 use crate::trap::{trap_handler, TrapContext};
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
-use core::cell::RefMut;
+use core::cell::{Ref, RefMut};
 
 /// Task control block structure
 ///
@@ -30,10 +30,18 @@ impl TaskControlBlock {
     pub fn inner_exclusive_access(&self) -> RefMut<'_, TaskControlBlockInner> {
         self.inner.exclusive_access()
     }
+    /// Get the immutable reference of the inner TCB
+    pub fn inner_ro_access(&self) -> Ref<'_, TaskControlBlockInner> {
+        self.inner.ro_access()
+    }
     /// Get the address of app's page table
     pub fn get_user_token(&self) -> usize {
         let inner = self.inner_exclusive_access();
         inner.memory_set.token()
+    }
+    /// Trivial getter for priority.
+    pub fn get_priority(&self) -> usize {
+        self.inner.ro_access().sched_info.get_priority()
     }
 }
 
@@ -403,6 +411,38 @@ impl TaskControlBlock {
         let mut inner = self.inner_exclusive_access();
         inner.task_status = TaskStatus::Running;
         self
+    }
+}
+
+#[derive(Clone)]
+/// Ordered scheduling task
+pub struct SchedOrdTask(Arc<TaskControlBlock>);
+
+impl PartialOrd for SchedOrdTask {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        let l_prio = self.0.inner_exclusive_access().sched_info.get_stride();
+        let r_prio = other.0.inner_exclusive_access().sched_info.get_stride();
+        l_prio.partial_cmp(&r_prio)
+    }
+}
+
+impl PartialEq for SchedOrdTask {
+    fn eq(&self, other: &Self) -> bool {
+        let l_prio = self.0.inner_exclusive_access().sched_info.get_stride();
+        let r_prio = other.0.inner_exclusive_access().sched_info.get_stride();
+        l_prio == r_prio
+    }
+}
+
+impl Into<Arc<TaskControlBlock>> for SchedOrdTask {
+    fn into(self) -> Arc<TaskControlBlock> {
+        self.0
+    }
+}
+
+impl From<Arc<TaskControlBlock>> for SchedOrdTask {
+    fn from(value: Arc<TaskControlBlock>) -> Self {
+        Self(value)
     }
 }
 
