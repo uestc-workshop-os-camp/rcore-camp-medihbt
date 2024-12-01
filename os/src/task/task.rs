@@ -1,15 +1,16 @@
 //! Types related to task management & Functions for completely changing TCB
 use super::TaskContext;
 use super::{kstack_alloc, pid_alloc, KernelStack, PidHandle};
-use crate::config::TRAP_CONTEXT_BASE;
+use crate::config::{MAX_SYSCALL_NUM, TRAP_CONTEXT_BASE};
 use crate::fs::{File, Stdin, Stdout};
 use crate::mm::{MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE};
 use crate::sync::UPSafeCell;
+use crate::timer;
 use crate::trap::{trap_handler, TrapContext};
 use alloc::sync::{Arc, Weak};
 use alloc::vec;
 use alloc::vec::Vec;
-use core::cell::RefMut;
+use core::cell::{Ref, RefMut};
 
 /// Task control block structure
 ///
@@ -30,6 +31,10 @@ impl TaskControlBlock {
     /// Get the mutable reference of the inner TCB
     pub fn inner_exclusive_access(&self) -> RefMut<'_, TaskControlBlockInner> {
         self.inner.exclusive_access()
+    }
+    /// Get the immutable reference of the inner TCB
+    pub fn inner_ro_access(&self) -> Ref<'_, TaskControlBlockInner> {
+        self.inner.ro_access()
     }
     /// Get the address of app's page table
     pub fn get_user_token(&self) -> usize {
@@ -71,6 +76,12 @@ pub struct TaskControlBlockInner {
 
     /// Program break
     pub program_brk: usize,
+
+    /// Task statistics
+    pub statistics: TcbStatistics,
+
+    /// Task scheduling infomation
+    pub sched_info: SchedInfo,
 }
 
 impl TaskControlBlockInner {
@@ -93,6 +104,141 @@ impl TaskControlBlockInner {
             self.fd_table.push(None);
             self.fd_table.len() - 1
         }
+    }
+}
+
+#[derive(Clone, Copy)]
+/// Data related to stride scheduling algorithm
+pub struct SchedInfo {
+    /// Priority
+    _priority: usize,
+
+    /// Pass (equals to STRIDE_BASE / priority)
+    _pass:     usize,
+
+    /// Current stride
+    _stride:   usize,
+}
+
+#[derive(Clone, Copy)]
+/// Task runtime statistics infomation.
+pub struct TcbStatistics {
+    /// Startup Time
+    pub startup_time: usize,
+
+    /// Syscall Infomation
+    pub syscall_times: [u32; MAX_SYSCALL_NUM],
+}
+
+impl SchedInfo {
+    /// default priority
+    pub const DEFAULT_PRIORITY:  usize  = 16;
+
+    /// default pass
+    pub const DEFAULT_PASS_BASE: usize = 65537;
+
+    /// default pass, like DEFAULT_PASS_BASE / DEFAULT_PRIORITY.
+    pub const DEFAULT_PASS:      usize = 4096;
+
+    /// New SchedInfo instance for new process.
+    pub fn new()-> Self {
+        Self {
+            _priority: Self::DEFAULT_PRIORITY,
+            _pass:     Self::DEFAULT_PASS,
+            _stride: 0,
+        }
+    }
+
+    /// New SchedInfo instance for new process, with priority `prio`.
+    pub fn with_priority(prio: usize)-> Self {
+        Self {
+            _priority: prio,
+            // Most of prioroties are running in DEFAULT_PRIORITY,
+            // use this selection to decrease dividing
+            _pass: if prio == Self::DEFAULT_PRIORITY {
+                    Self::DEFAULT_PASS
+                } else {
+                    Self::DEFAULT_PASS_BASE / prio
+                },
+            _stride: 0
+        }
+    }
+
+    /// Used in fork(): clone a schedinfo from parent process
+    pub fn clone_from(old_sched_info: &Self)-> Self {
+        Self {
+            _priority: old_sched_info._priority,
+            _pass:     old_sched_info._pass,
+            _stride:   0
+        }
+    }
+
+    /// Reset schedule infomation. This is triggered when calling exec().
+    pub fn full_reset(&mut self) {
+        *self = Self::new()
+    }
+
+    /// Trivial getter: stride
+    pub fn get_stride(&self)-> usize { self._stride }
+    /// Reset: stride
+    pub fn reset_stride(&mut self)-> &mut Self {
+        self._stride = 0; self
+    }
+
+    /// Trivial getter: pass
+    pub fn get_pass(&self)-> usize { self._pass }
+
+    /// Trivial getter: priority
+    pub fn get_priority(&self)-> usize { self._priority }
+    /// Setter: priority
+    ///
+    /// This updates `_pass` field
+    pub fn set_priority(&mut self, priority: usize)-> &mut Self {
+        self._priority = priority;
+        self._pass = match priority {
+            Self::DEFAULT_PRIORITY => Self::DEFAULT_PASS,
+            _ => Self::DEFAULT_PASS_BASE / priority,
+        };
+        self
+    }
+
+    /// Update schedule infomation on process run
+    pub fn update(&mut self, dtime: usize)-> &mut Self {
+        self._stride += self._pass as usize * dtime;
+        self
+    }
+}
+
+impl TcbStatistics {
+    /// Create an enpty task statistics item
+    pub fn empty()-> Self {
+        Self {
+            startup_time: 0,
+            syscall_times: [0; MAX_SYSCALL_NUM]
+        }
+    }
+
+    /// React on process startup
+    pub fn on_activate(&mut self) {
+        if self.startup_time == 0 {
+            self.startup_time = timer::get_time();
+        }
+    }
+
+    /// React on syscall
+    pub fn on_syscall(&mut self, syscall_id: usize) {
+        self.syscall_times[syscall_id] += 1;
+    }
+
+    /// Reset this
+    pub fn reset(&mut self) {
+        self.startup_time  = 0;
+        self.syscall_times = [0; MAX_SYSCALL_NUM];
+    }
+
+    /// React on executing this
+    pub fn on_exec(&mut self) {
+        self.reset();
     }
 }
 
@@ -135,6 +281,8 @@ impl TaskControlBlock {
                     ],
                     heap_bottom: user_sp,
                     program_brk: user_sp,
+                    statistics:  TcbStatistics::empty(),
+                    sched_info:  SchedInfo::new(),
                 })
             },
         };
@@ -216,6 +364,8 @@ impl TaskControlBlock {
                     fd_table: new_fd_table,
                     heap_bottom: parent_inner.heap_bottom,
                     program_brk: parent_inner.program_brk,
+                    statistics:  TcbStatistics::empty(),
+                    sched_info:  SchedInfo::clone_from(&parent_inner.sched_info),
                 })
             },
         });
@@ -229,6 +379,14 @@ impl TaskControlBlock {
         task_control_block
         // **** release child PCB
         // ---- release parent PCB
+    }
+
+    /// spawn a new process with elf data `app_elf`
+    pub fn spawn(self: &Arc<Self>, app_elf: &[u8])-> Arc<Self> {
+        let ret = Arc::new(Self::new(app_elf));
+        ret.inner_exclusive_access().parent = Some(Arc::downgrade(&self));
+        self.inner_exclusive_access().children.push(ret.clone());
+        ret
     }
 
     /// get pid of process

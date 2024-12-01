@@ -1,3 +1,5 @@
+use crate::layout;
+
 use super::{get_block_cache, BlockDevice, BLOCK_SZ};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -13,6 +15,9 @@ const NAME_LENGTH_LIMIT: usize = 27;
 const INODE_INDIRECT1_COUNT: usize = BLOCK_SZ / 4;
 /// The max number of indirect2 inodes
 const INODE_INDIRECT2_COUNT: usize = INODE_INDIRECT1_COUNT * INODE_INDIRECT1_COUNT;
+/// The max number of indirect3 inodes
+#[allow(unused)]
+const INODE_INDIRECT3_COUNT: usize = INODE_INDIRECT2_COUNT * INODE_INDIRECT1_COUNT;
 /// The upper bound of direct inode index
 const DIRECT_BOUND: usize = INODE_DIRECT_COUNT;
 /// The upper bound of indirect1 inode index
@@ -20,6 +25,9 @@ const INDIRECT1_BOUND: usize = DIRECT_BOUND + INODE_INDIRECT1_COUNT;
 /// The upper bound of indirect2 inode indexs
 #[allow(unused)]
 const INDIRECT2_BOUND: usize = INDIRECT1_BOUND + INODE_INDIRECT2_COUNT;
+/// The upper bound of indirect3 inode indexs
+// #[allow(unused)]
+// const INDIRECT3_BOUND: usize = INDIRECT2_BOUND + INODE_INDIRECT3_COUNT;
 /// Super block of a filesystem
 #[repr(C)]
 pub struct SuperBlock {
@@ -86,6 +94,8 @@ pub struct DiskInode {
     pub indirect1: u32,
     pub indirect2: u32,
     type_: DiskInodeType,
+    _padding_dummy0_: u8,
+    refcount_: u16,
 }
 
 impl DiskInode {
@@ -97,7 +107,28 @@ impl DiskInode {
         self.indirect1 = 0;
         self.indirect2 = 0;
         self.type_ = type_;
+        self.refcount_  = 1;
     }
+    /// Reference Count
+    #[allow(unused)]
+    pub fn get_ref_count(&self)-> u16 {
+        self.refcount_
+    }
+    /// Increase reference count and return this
+    #[allow(unused)]
+    pub fn refthis(&mut self)-> &mut Self {
+        self.refcount_ += 1;
+        self
+    }
+    /// Decrease reference count.
+    /// returns if this inode is still alive.
+    #[allow(unused)]
+    pub fn unref(&mut self)-> bool {
+        assert_ne!(self.refcount_, 0, "Disk Inode double free");
+        self.refcount_ -= 1;
+        self.refcount_ != 0u16
+    }
+
     /// Whether this inode is a directory
     pub fn is_dir(&self) -> bool {
         self.type_ == DiskInodeType::Directory
@@ -135,6 +166,11 @@ impl DiskInode {
     pub fn blocks_num_needed(&self, new_size: u32) -> u32 {
         assert!(new_size >= self.size);
         Self::total_blocks(new_size) - Self::total_blocks(self.size)
+    }
+    /// Get the number of data blocks that have to be DEallocated given to the new size of data
+    pub fn blocks_num_deallocated(&self, new_size: u32)-> u32 {
+        assert!(new_size <= self.size);
+        Self::total_blocks(self.size) - Self::total_blocks(new_size)
     }
     /// Get id of block given inner id
     pub fn get_block_id(&self, inner_id: u32, block_device: &Arc<dyn BlockDevice>) -> u32 {
@@ -307,6 +343,33 @@ impl DiskInode {
             });
         self.indirect2 = 0;
         v
+    }
+
+    /// List block-id to deallocate and truncate this file to `new_bytes`.
+    pub fn dealloc_to(&mut self, new_bytes: u32, _block_device: &Arc<dyn BlockDevice>) -> Vec<u32>
+    {
+        assert!(new_bytes <= self.size);
+        // const BLOCK_SZ: u32 = layout::BLOCK_SZ as u32;
+        // let blk_rbegin = (self.size - 1) / BLOCK_SZ;
+        // let blk_rend   = (new_bytes - 1) / BLOCK_SZ;
+        let /*mut*/ ret = Vec::new();
+        // let mut curr_blk = blk_rbegin;
+        // while curr_blk > blk_rend {
+        //     let mut pyhs_blk: u32;
+        //     // Cleaning 2nd indices
+        //     if curr_blk as usize >= INDIRECT1_BOUND {
+        //         let offset = curr_blk - INDIRECT1_BOUND as u32;
+        //         let offset_l1 = offset % INODE_INDIRECT1_COUNT as u32;
+        //         get_block_cache(self.indirect2, block_device)
+        //             .lock()
+        //             .modify(, f)
+        //         // let _1stblks = 
+        //     }
+        //     curr_blk -= 1;
+        // }
+
+        self.size = new_bytes;
+        ret
     }
     /// Read data from current disk inode
     pub fn read_at(

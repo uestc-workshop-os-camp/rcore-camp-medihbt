@@ -4,7 +4,7 @@
 //!
 //! `UPSafeCell<OSInodeInner>` -> `OSInode`: for static `ROOT_INODE`,we
 //! need to wrap `OSInodeInner` into `UPSafeCell`
-use super::File;
+use super::{File, StatMode};
 use crate::drivers::BLOCK_DEVICE;
 use crate::mm::UserBuffer;
 use crate::sync::UPSafeCell;
@@ -124,6 +124,53 @@ pub fn open_file(name: &str, flags: OpenFlags) -> Option<Arc<OSInode>> {
     }
 }
 
+/// Link a file
+pub fn link_file(from_name: &str, to_name: &str)-> Option<Arc<Inode>> {
+    warn!("link start");
+    if from_name == to_name {
+        warn!("Link name {} is original", to_name);
+        return None;
+    }
+    let mut from_node = if let Some(x) = ROOT_INODE.find(from_name) {
+        if x.is_dir_file().0 {
+            warn!("Cannot link a directory");
+            return None;
+        }
+        x
+    } else {
+        warn!("File name {} NOT FOUND", from_name);
+        return None;
+    };
+    if ROOT_INODE.find(to_name).is_some() {
+        warn!("Link name {} is existed file", to_name);
+        return None;
+    }
+
+    match ROOT_INODE.hard_link(&mut from_node, to_name) {
+        Ok(v) => Some(v),
+        Err(s) => {
+            warn!("efs: {}", s);
+            None
+        }
+    }
+}
+
+/// unlink a file `filename`.
+pub fn unlink_file(filename: &str)-> Result<(), &'static str> {
+    let mut from_node = if let Some(x) = ROOT_INODE.find(filename) {
+        if x.is_dir_file().0 {
+            return Err("Cannot link a directory");
+        }
+        x
+    } else {
+        warn!("File name {} NOT FOUND", filename);
+        return Err("File name NOT FOUND");
+    };
+    ROOT_INODE.hard_unlink(&mut from_node, |str| {
+        warn!("efs message: {}", str);
+    })
+}
+
 impl File for OSInode {
     fn readable(&self) -> bool {
         self.readable
@@ -154,5 +201,16 @@ impl File for OSInode {
             total_write_size += write_size;
         }
         total_write_size
+    }
+
+    fn stat(&self)-> super::Stat {
+        let inner = self.inner.ro_access();
+        let (isdir, _isfile) = inner.inode.is_dir_file();
+        super::Stat::new(
+            0,
+            inner.inode.get_id() as u64,
+            if isdir { StatMode::DIR } else { StatMode::FILE },
+            inner.inode.get_ref_count()
+        )
     }
 }

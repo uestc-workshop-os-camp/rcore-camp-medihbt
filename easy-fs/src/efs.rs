@@ -148,4 +148,9 @@ impl EasyFileSystem {
             (block_id - self.data_area_start_block) as usize,
         )
     }
+
+    /// Inode area start block id. This is useful in getting inode id.
+    pub fn get_inode_start_block_id(&self)-> u32 {
+        self.inode_area_start_block
+    }
 }
