@@ -1,5 +1,3 @@
-use crate::layout;
-
 use super::{get_block_cache, BlockDevice, BLOCK_SZ};
 use alloc::sync::Arc;
 use alloc::vec::Vec;

@@ -1,5 +1,3 @@
-use core::panic;
-
 use crate::BLOCK_SZ;
 
 use super::{
