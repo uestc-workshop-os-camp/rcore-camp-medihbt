@@ -1,4 +1,4 @@
-use super::File;
+use super::{File, Stat, StatMode};
 use crate::mm::UserBuffer;
 use crate::sync::UPSafeCell;
 use alloc::sync::{Arc, Weak};
@@ -172,5 +172,9 @@ impl File for Pipe {
                 }
             }
         }
+    }
+    
+    fn stat(&self)-> super::Stat {
+        Stat::new(0, 0, StatMode::FIFO, Arc::strong_count(&self.buffer) as u32)
     }
 }

@@ -17,7 +17,9 @@ mod processor;
 mod signal;
 mod switch;
 #[allow(clippy::module_inception)]
-mod task;
+pub mod task;
+
+use core::ops::DerefMut;
 
 use crate::fs::{open_file, OpenFlags};
 use alloc::sync::Arc;
@@ -26,6 +28,7 @@ use lazy_static::*;
 use manager::fetch_task;
 use manager::remove_from_pid2task;
 use switch::__switch;
+use task::TaskControlBlockInner;
 pub use task::{TaskControlBlock, TaskStatus};
 
 pub use action::{SignalAction, SignalActions};
@@ -236,6 +239,33 @@ fn check_pending_signals() {
             }
         }
     }
+}
+
+/// Read current TCB with function readf().
+pub fn read_current_tcb<RetT>(readf: impl FnOnce(&PidHandle, &TaskControlBlockInner)-> RetT)-> RetT
+{
+    let tcb = current_task().unwrap();
+    trace!("Process {} borrowed itself", tcb.pid.0);
+    let rtcb = tcb.inner_exclusive_access();
+    let ret = readf(&tcb.pid, rtcb.deref());
+    trace!("Process {} released itself", tcb.pid.0);
+    ret
+}
+
+/// Get current PID
+pub fn get_current_pid()-> usize {
+    current_task().unwrap().getpid()
+}
+
+/// Update current TCB with function updatef().
+pub fn update_current_tcb<RetT>(updatef: impl FnOnce(&PidHandle, &mut TaskControlBlockInner)->RetT)-> RetT
+{
+    let tcb = current_task().unwrap();
+    trace!("Process {} borrowed itself (mut)", tcb.pid.0);
+    let mut rtcb = tcb.inner_exclusive_access();
+    let ret = updatef(&tcb.pid, rtcb.deref_mut());
+    trace!("Process {} released itself (mut)", tcb.pid.0);
+    ret
 }
 
 /// Handle signals for the current process

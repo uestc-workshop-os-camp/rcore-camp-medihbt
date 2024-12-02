@@ -1,13 +1,12 @@
 //! Process management syscalls
 
 use crate::{
-    config::MAX_SYSCALL_NUM,
+    config::{CLOCK_FREQ, MAX_SYSCALL_NUM},
     fs::{open_file, OpenFlags},
-    mm::{translated_ref, translated_refmut, translated_str},
+    mm::{translated_ref, translated_refmut, translated_str, utils::copy_obj_to_user},
     task::{
-        add_task, current_task, current_user_token, exit_current_and_run_next, pid2task,
-        suspend_current_and_run_next, SignalAction, SignalFlags, TaskStatus, MAX_SIG,
-    },
+        add_task, current_task, current_user_token, exit_current_and_run_next, pid2task, read_current_tcb, suspend_current_and_run_next, update_current_tcb, SignalAction, SignalFlags, TaskStatus, MAX_SIG
+    }, timer,
 };
 use alloc::{string::String, sync::Arc, vec::Vec};
 
@@ -149,28 +148,44 @@ pub fn sys_kill(pid: usize, signum: i32) -> isize {
 /// HINT: You might reimplement it with virtual memory management.
 /// HINT: What if [`TimeVal`] is splitted by two pages ?
 pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
-    trace!("kernel:pid[{}] sys_get_time NOT IMPLEMENTED", current_task().unwrap().pid.0);
-    -1
+    trace!("kernel:pid[{}] sys_get_time", current_task().unwrap().pid.0);
+    let time = crate::timer::get_time();
+    unsafe {
+        copy_obj_to_user(_ts, &TimeVal {
+            sec: time / CLOCK_FREQ,
+            usec: (time * 1000_000 / CLOCK_FREQ) % 1000_000
+        });
+    }
+    0
 }
 
 /// YOUR JOB: Finish sys_task_info to pass testcases
 /// HINT: You might reimplement it with virtual memory management.
 /// HINT: What if [`TaskInfo`] is splitted by two pages ?
 pub fn sys_task_info(_ti: *mut TaskInfo) -> isize {
-    trace!("kernel:pid[{}] sys_task_info NOT IMPLEMENTED", current_task().unwrap().pid.0);
-    -1
+    trace!("kernel:pid[{}] sys_task_info", current_task().unwrap().pid.0);
+    read_current_tcb(|_pid, itcb| {
+        unsafe {
+            copy_obj_to_user(_ti, &TaskInfo {
+                status:        itcb.task_status,
+                syscall_times: itcb.statistics.syscall_times,
+                time: timer::get_time_ms() - itcb.statistics.startup_time * 1000 / CLOCK_FREQ,
+            });
+        }
+        0
+    })
 }
 
 /// YOUR JOB: Implement mmap.
-pub fn sys_mmap(_start: usize, _len: usize, _port: usize) -> isize {
-    trace!("kernel:pid[{}] sys_mmap NOT IMPLEMENTED", current_task().unwrap().pid.0);
-    -1
+pub fn sys_mmap(start: usize, len: usize, prot: usize) -> isize {
+    trace!("kernel:pid[{}] sys_mmap", current_task().unwrap().pid.0);
+    crate::mm::utils::mmap_handle::do_mmap(start, len, prot)
 }
 
 /// YOUR JOB: Implement munmap.
 pub fn sys_munmap(_start: usize, _len: usize) -> isize {
-    trace!("kernel:pid[{}] sys_munmap NOT IMPLEMENTED", current_task().unwrap().pid.0);
-    -1
+    trace!("kernel:pid[{}] sys_munmap", current_task().unwrap().pid.0);
+    crate::mm::utils::mmap_handle::do_munmap(_start, _len)
 }
 
 /// change data segment size
@@ -186,14 +201,32 @@ pub fn sys_sbrk(size: i32) -> isize {
 /// YOUR JOB: Implement spawn.
 /// HINT: fork + exec =/= spawn
 pub fn sys_spawn(_path: *const u8) -> isize {
-    trace!("kernel:pid[{}] sys_spawn NOT IMPLEMENTED", current_task().unwrap().pid.0);
-    -1
+    trace!("kernel:pid[{}] sys_spawn", current_task().unwrap().pid.0);
+    let token = current_user_token();
+    let path = translated_str(token, _path);
+    if let Some(app_inode) = open_file(path.as_str(), OpenFlags::RDONLY) {
+        let app_data = app_inode.read_all();
+        let task = current_task().unwrap().spawn(app_data.as_slice());
+        let pid = task.pid.0 as isize;
+        add_task(task);
+        pid
+    } else {
+        warn!("NO application named {}", path);
+        -1
+    }
 }
 
 // YOUR JOB: Set task priority.
 pub fn sys_set_priority(_prio: isize) -> isize {
-    trace!("kernel:pid[{}] sys_set_priority NOT IMPLEMENTED", current_task().unwrap().pid.0);
-    -1
+    trace!("kernel:pid[{}] sys_set_priority", current_task().unwrap().pid.0);
+    update_current_tcb(|pid, itcb| {
+        if _prio <= 1 {
+            warn!("Process {}: Illegal priority {}", pid.0, _prio);
+            return -1;
+        }
+        itcb.sched_info.set_priority(_prio as usize);
+        _prio
+    })
 }
 
 pub fn sys_sigprocmask(mask: u32) -> isize {

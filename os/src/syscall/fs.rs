@@ -1,7 +1,8 @@
 //! File and filesystem-related syscalls
 use crate::fs::{make_pipe, open_file, OpenFlags, Stat};
+use crate::mm::utils::copy_obj_to_user;
 use crate::mm::{translated_byte_buffer, translated_refmut, translated_str, UserBuffer};
-use crate::task::{current_task, current_user_token};
+use crate::task::{current_task, current_user_token, read_current_tcb};
 use alloc::sync::Arc;
 
 pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
@@ -107,19 +108,51 @@ pub fn sys_dup(fd: usize) -> isize {
 }
 
 /// YOUR JOB: Implement fstat.
-pub fn sys_fstat(_fd: usize, _st: *mut Stat) -> isize {
-    trace!("kernel:pid[{}] sys_fstat NOT IMPLEMENTED", current_task().unwrap().pid.0);
-    -1
+pub fn sys_fstat(fd: usize, st: *mut Stat) -> isize {
+	trace!("kernel:pid[{}] sys_fstat", current_task().unwrap().pid.0);
+    let stat_res = read_current_tcb(|_pid, tcb| {
+        if fd >= tcb.fd_table.len() {
+            None
+        } else if let Some(ref file) = tcb.fd_table[fd] {
+            Some(file.stat())
+        } else {
+            None
+        }
+    });
+    if let Some(stat) = stat_res {
+        unsafe { copy_obj_to_user(st, &stat); }
+        0
+    } else {
+        -1
+    }
 }
 
 /// YOUR JOB: Implement linkat.
 pub fn sys_linkat(_old_name: *const u8, _new_name: *const u8) -> isize {
-    trace!("kernel:pid[{}] sys_linkat NOT IMPLEMENTED", current_task().unwrap().pid.0);
-    -1
+    trace!("kernel:pid[{}] sys_linkat", current_task().unwrap().pid.0);
+    let token = current_user_token();
+    let from_name = translated_str(token, _old_name);
+    let to_name = translated_str(token, _new_name);
+    match crate::fs::link_file(from_name.as_str(), to_name.as_str()) {
+        Some(_) => 0,
+        None    => -1
+    }
 }
 
 /// YOUR JOB: Implement unlinkat.
 pub fn sys_unlinkat(_name: *const u8) -> isize {
-    trace!("kernel:pid[{}] sys_unlinkat NOT IMPLEMENTED", current_task().unwrap().pid.0);
-    -1
+    trace!("kernel:pid[{}] sys_unlinkat", current_task().unwrap().pid.0);
+    let token = current_user_token();
+    let filename = translated_str(token, _name);
+
+    match crate::fs::unlink_file(filename.as_str()) {
+        Ok(_)  => {
+            warn!("unlink success");
+            0
+        },
+        Err(s) => {
+            warn!("unlink err: {s}");
+            -1
+        }
+    }
 }

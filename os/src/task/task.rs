@@ -2,11 +2,7 @@
 
 use super::{kstack_alloc, pid_alloc, KernelStack, PidHandle, SignalActions, SignalFlags, TaskContext};
 use crate::{
-    config::TRAP_CONTEXT_BASE,
-    fs::{File, Stdin, Stdout},
-    mm::{translated_refmut, MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE},
-    sync::UPSafeCell,
-    trap::{trap_handler, TrapContext},
+    config::{MAX_SYSCALL_NUM, TRAP_CONTEXT_BASE}, fs::{File, Stdin, Stdout}, mm::{translated_refmut, MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE}, sync::UPSafeCell, timer, trap::{trap_handler, TrapContext}
 };
 use alloc::{
     string::String,
@@ -14,7 +10,7 @@ use alloc::{
     vec,
     vec::Vec,
 };
-use core::cell::RefMut;
+use core::cell::{Ref, RefMut};
 
 /// Task control block structure
 ///
@@ -36,6 +32,10 @@ impl TaskControlBlock {
     pub fn inner_exclusive_access(&self) -> RefMut<'_, TaskControlBlockInner> {
         self.inner.exclusive_access()
     }
+    /// Get the immutable reference of the inner TCB
+    pub fn inner_ro_access(&self) -> Ref<'_, TaskControlBlockInner> {
+        self.inner.ro_access()
+    }
     /// Get the address of app's page table
     pub fn get_user_token(&self) -> usize {
         let inner = self.inner_exclusive_access();
@@ -43,6 +43,7 @@ impl TaskControlBlock {
     }
 }
 
+/// Inner task control block.
 pub struct TaskControlBlockInner {
     /// The physical page number of the frame where the trap context is placed
     pub trap_cx_ppn: PhysPageNum,
@@ -69,17 +70,21 @@ pub struct TaskControlBlockInner {
 
     /// It is set when active exit or execution error occurs
     pub exit_code: i32,
+    /// Opened files.
     pub fd_table: Vec<Option<Arc<dyn File + Send + Sync>>>,
+    /// Signal flags.
     pub signals: SignalFlags,
+    /// Signal masks.
     pub signal_mask: SignalFlags,
-    // the signal which is being handling
+    /// the signal which is being handling
     pub handling_sig: isize,
-    // Signal actions
+    /// Signal actions
     pub signal_actions: SignalActions,
-    // if the task is killed
+    /// if the task is killed
     pub killed: bool,
-    // if the task is frozen by a signal
+    /// if the task is frozen by a signal
     pub frozen: bool,
+    /// trap context backup.
     pub trap_ctx_backup: Option<TrapContext>,
 
     /// Heap bottom
@@ -87,21 +92,31 @@ pub struct TaskControlBlockInner {
 
     /// Program break
     pub program_brk: usize,
+
+    /// Task statistics
+    pub statistics: TcbStatistics,
+
+    /// Task scheduling infomation
+    pub sched_info: SchedInfo,
 }
 
 impl TaskControlBlockInner {
+    /// Get trap context.
     pub fn get_trap_cx(&self) -> &'static mut TrapContext {
         self.trap_cx_ppn.get_mut()
     }
+    /// Get memory user token for mapping.
     pub fn get_user_token(&self) -> usize {
         self.memory_set.token()
     }
     fn get_status(&self) -> TaskStatus {
         self.task_status
     }
+    /// If this task is zombie.
     pub fn is_zombie(&self) -> bool {
         self.get_status() == TaskStatus::Zombie
     }
+    /// Allocate a new fd.
     pub fn alloc_fd(&mut self) -> usize {
         if let Some(fd) = (0..self.fd_table.len()).find(|fd| self.fd_table[*fd].is_none()) {
             fd
@@ -109,6 +124,141 @@ impl TaskControlBlockInner {
             self.fd_table.push(None);
             self.fd_table.len() - 1
         }
+    }
+}
+
+#[derive(Clone, Copy)]
+/// Data related to stride scheduling algorithm
+pub struct SchedInfo {
+    /// Priority
+    _priority: usize,
+
+    /// Pass (equals to STRIDE_BASE / priority)
+    _pass:     usize,
+
+    /// Current stride
+    _stride:   usize,
+}
+
+#[derive(Clone, Copy)]
+/// Task runtime statistics infomation.
+pub struct TcbStatistics {
+    /// Startup Time
+    pub startup_time: usize,
+
+    /// Syscall Infomation
+    pub syscall_times: [u32; MAX_SYSCALL_NUM],
+}
+
+impl SchedInfo {
+    /// default priority
+    pub const DEFAULT_PRIORITY:  usize  = 16;
+
+    /// default pass
+    pub const DEFAULT_PASS_BASE: usize = 65537;
+
+    /// default pass, like DEFAULT_PASS_BASE / DEFAULT_PRIORITY.
+    pub const DEFAULT_PASS:      usize = 4096;
+
+    /// New SchedInfo instance for new process.
+    pub fn new()-> Self {
+        Self {
+            _priority: Self::DEFAULT_PRIORITY,
+            _pass:     Self::DEFAULT_PASS,
+            _stride: 0,
+        }
+    }
+
+    /// New SchedInfo instance for new process, with priority `prio`.
+    pub fn with_priority(prio: usize)-> Self {
+        Self {
+            _priority: prio,
+            // Most of prioroties are running in DEFAULT_PRIORITY,
+            // use this selection to decrease dividing
+            _pass: if prio == Self::DEFAULT_PRIORITY {
+                    Self::DEFAULT_PASS
+                } else {
+                    Self::DEFAULT_PASS_BASE / prio
+                },
+            _stride: 0
+        }
+    }
+
+    /// Used in fork(): clone a schedinfo from parent process
+    pub fn clone_from(old_sched_info: &Self)-> Self {
+        Self {
+            _priority: old_sched_info._priority,
+            _pass:     old_sched_info._pass,
+            _stride:   0
+        }
+    }
+
+    /// Reset schedule infomation. This is triggered when calling exec().
+    pub fn full_reset(&mut self) {
+        *self = Self::new()
+    }
+
+    /// Trivial getter: stride
+    pub fn get_stride(&self)-> usize { self._stride }
+    /// Reset: stride
+    pub fn reset_stride(&mut self)-> &mut Self {
+        self._stride = 0; self
+    }
+
+    /// Trivial getter: pass
+    pub fn get_pass(&self)-> usize { self._pass }
+
+    /// Trivial getter: priority
+    pub fn get_priority(&self)-> usize { self._priority }
+    /// Setter: priority
+    ///
+    /// This updates `_pass` field
+    pub fn set_priority(&mut self, priority: usize)-> &mut Self {
+        self._priority = priority;
+        self._pass = match priority {
+            Self::DEFAULT_PRIORITY => Self::DEFAULT_PASS,
+            _ => Self::DEFAULT_PASS_BASE / priority,
+        };
+        self
+    }
+
+    /// Update schedule infomation on process run
+    pub fn update(&mut self, dtime: usize)-> &mut Self {
+        self._stride += self._pass as usize * dtime;
+        self
+    }
+}
+
+impl TcbStatistics {
+    /// Create an enpty task statistics item
+    pub fn empty()-> Self {
+        Self {
+            startup_time: 0,
+            syscall_times: [0; MAX_SYSCALL_NUM]
+        }
+    }
+
+    /// React on process startup
+    pub fn on_activate(&mut self) {
+        if self.startup_time == 0 {
+            self.startup_time = timer::get_time();
+        }
+    }
+
+    /// React on syscall
+    pub fn on_syscall(&mut self, syscall_id: usize) {
+        self.syscall_times[syscall_id] += 1;
+    }
+
+    /// Reset this
+    pub fn reset(&mut self) {
+        self.startup_time  = 0;
+        self.syscall_times = [0; MAX_SYSCALL_NUM];
+    }
+
+    /// React on executing this
+    pub fn on_exec(&mut self) {
+        self.reset();
     }
 }
 
@@ -158,6 +308,8 @@ impl TaskControlBlock {
                     trap_ctx_backup: None,
                     heap_bottom: user_sp,
                     program_brk: user_sp,
+                    statistics:  TcbStatistics::empty(),
+                    sched_info:  SchedInfo::new(),
                 })
             },
         };
@@ -273,6 +425,8 @@ impl TaskControlBlock {
                     trap_ctx_backup: None,
                     heap_bottom: parent_inner.heap_bottom,
                     program_brk: parent_inner.program_brk,
+                    statistics:  TcbStatistics::empty(),
+                    sched_info:  SchedInfo::clone_from(&parent_inner.sched_info),
                 })
             },
         });
@@ -286,6 +440,14 @@ impl TaskControlBlock {
         task_control_block
         // **** release child PCB
         // ---- release parent PCB
+    }
+
+    /// spawn a new process with elf data `app_elf`
+    pub fn spawn(self: &Arc<Self>, app_elf: &[u8])-> Arc<Self> {
+        let ret = Arc::new(Self::new(app_elf));
+        ret.inner_exclusive_access().parent = Some(Arc::downgrade(&self));
+        self.inner_exclusive_access().children.push(ret.clone());
+        ret
     }
 
     /// get pid of process
