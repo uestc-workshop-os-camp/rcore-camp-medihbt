@@ -18,6 +18,7 @@ mod signal;
 mod switch;
 #[allow(clippy::module_inception)]
 pub mod task;
+pub mod mailbox;
 
 use core::ops::DerefMut;
 

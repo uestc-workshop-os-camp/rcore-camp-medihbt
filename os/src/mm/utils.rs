@@ -35,7 +35,7 @@ pub fn copy_obj_from_user<DataT: Sized+Copy>(kobject: &mut DataT, user_src: *con
 }
 
 /// Copy N bytes to user space from kernel space.
-pub unsafe fn copy_to_user(user_dst: *mut u8, len: usize, kernel_src: &[u8])
+pub unsafe fn copy_to_user(user_dst: *mut u8, len: usize, kernel_src: &[u8])-> Result<(), ()>
 {
     assert!(user_dst != core::ptr::null_mut());
     let cur_mm_token = task::current_user_token();
@@ -50,6 +50,7 @@ pub unsafe fn copy_to_user(user_dst: *mut u8, len: usize, kernel_src: &[u8])
         }
         kbegin += phys.len();
     }
+    Ok(())
 }
 
 /// Copy a POD object from kernel space to user space.
@@ -60,7 +61,7 @@ pub unsafe fn copy_obj_to_user<DataT: Sized>(user_dst: *mut DataT, kobject: &Dat
     let kptr = kobject as *const DataT as *const u8;
     let uptr = user_dst as *mut u8;
     unsafe {
-        copy_to_user(uptr, len, core::slice::from_raw_parts(kptr, len));
+        copy_to_user(uptr, len, core::slice::from_raw_parts(kptr, len)).unwrap();
     }
 }
 

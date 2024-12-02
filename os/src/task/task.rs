@@ -1,6 +1,6 @@
 //! Types related to task management & Functions for completely changing TCB
 
-use super::{kstack_alloc, pid_alloc, KernelStack, PidHandle, SignalActions, SignalFlags, TaskContext};
+use super::{kstack_alloc, mailbox::MailBox, pid_alloc, KernelStack, PidHandle, SignalActions, SignalFlags, TaskContext};
 use crate::{
     config::{MAX_SYSCALL_NUM, TRAP_CONTEXT_BASE}, fs::{File, Stdin, Stdout}, mm::{translated_refmut, MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE}, sync::UPSafeCell, timer, trap::{trap_handler, TrapContext}
 };
@@ -98,6 +98,9 @@ pub struct TaskControlBlockInner {
 
     /// Task scheduling infomation
     pub sched_info: SchedInfo,
+
+    /// Mailbox
+    pub mailbox: MailBox,
 }
 
 impl TaskControlBlockInner {
@@ -310,6 +313,7 @@ impl TaskControlBlock {
                     program_brk: user_sp,
                     statistics:  TcbStatistics::empty(),
                     sched_info:  SchedInfo::new(),
+                    mailbox: MailBox::new(),
                 })
             },
         };
@@ -427,6 +431,7 @@ impl TaskControlBlock {
                     program_brk: parent_inner.program_brk,
                     statistics:  TcbStatistics::empty(),
                     sched_info:  SchedInfo::clone_from(&parent_inner.sched_info),
+                    mailbox:     parent_inner.mailbox.clone(),
                 })
             },
         });

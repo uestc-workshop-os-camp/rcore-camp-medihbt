@@ -3,7 +3,7 @@
 use crate::{
     config::{CLOCK_FREQ, MAX_SYSCALL_NUM},
     fs::{open_file, OpenFlags},
-    mm::{translated_ref, translated_refmut, translated_str, utils::copy_obj_to_user},
+    mm::{translated_ref, translated_refmut, translated_str, utils::{copy_from_user, copy_obj_to_user, copy_to_user}},
     task::{
         add_task, current_task, current_user_token, exit_current_and_run_next, pid2task, read_current_tcb, suspend_current_and_run_next, update_current_tcb, SignalAction, SignalFlags, TaskStatus, MAX_SIG
     }, timer,
@@ -294,6 +294,34 @@ pub fn sys_sigaction(
         *translated_refmut(token, old_action) = prev_action;
         inner.signal_actions.table[signum as usize] = *translated_ref(token, action);
         0
+    } else {
+        -1
+    }
+}
+
+pub fn sys_mailread(buf: *mut u8, len: usize)-> isize {
+    trace!("kernel:pid[{}] sys_mailread", current_task().unwrap().pid.0);
+    if buf.is_null() || len == 0 {
+        return -1;
+    }
+    update_current_tcb(|_pid, tcb| {
+        let msg = tcb.mailbox.ringbuf.pop_nbytes(len);
+        match unsafe { copy_to_user(buf, msg.len(), msg.as_slice()) } {
+            Ok(_) => msg.len() as isize, Err(_) => -1
+        }
+    })
+}
+
+pub fn sys_mailwrite(pid: usize, buf: *const u8, len: usize)-> isize {
+    trace!("kernel:pid[{}] sys_mailwrite", current_task().unwrap().pid.0);
+    if buf.is_null() {
+        return -1;
+    }
+    let mut data = Vec::new();
+    data.resize(len, 0u8);
+    unsafe { copy_from_user(data.as_mut_slice(), buf, len); }
+    if let Some(tcb) = pid2task(pid) {
+        tcb.inner_exclusive_access().mailbox.ringbuf.push_bytes(data.as_slice()) as isize
     } else {
         -1
     }
