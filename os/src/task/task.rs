@@ -9,6 +9,7 @@ use crate::trap::{trap_handler, TrapContext};
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::cell::{Ref, RefMut};
+use core::cmp::Ordering;
 
 /// Task control block structure
 ///
@@ -102,6 +103,25 @@ impl TaskControlBlockInner {
     pub fn is_zombie(&self) -> bool {
         self.get_status() == TaskStatus::Zombie
     }
+
+    /// Slot method: activate
+    pub fn on_activate(&mut self) {
+        self.task_status = TaskStatus::Running;
+        self.statistics.on_activate();
+    }
+
+    /// Slot method: deactivate. Run on this task changing state from 'RUNNING' to other state.
+    pub fn on_deactivate(&mut self) {
+        self.statistics.on_deactivate();
+        self.sched_info.update(self.statistics.get_last_run_time());
+    }
+
+    /// Slot method: Run on this TCB is killed.
+    pub fn on_dead(&mut self, task_status: TaskStatus, exit_code: i32) {
+        self.on_deactivate();
+        self.task_status = task_status;
+        self.exit_code   = exit_code;
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -112,6 +132,12 @@ pub struct TcbStatistics {
 
     /// Syscall Infomation
     pub syscall_times: [u32; MAX_SYSCALL_NUM],
+
+    /// Run time Infomation: Last-acativated time
+    pub last_activate_time: usize,
+
+    /// Run time infomation: Last-stopped time
+    pub last_deactivate_time: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -127,15 +153,19 @@ pub struct SchedInfo {
     _stride:   usize,
 }
 
+/// Stride object, which lives in ready queue.
+#[derive(Clone)]
+pub struct Stride(usize, Arc<TaskControlBlock>);
+
 impl SchedInfo {
     /// default priority
-    pub const DEFAULT_PRIORITY:  usize  = 16;
+    pub const DEFAULT_PRIORITY: usize  = 16;
 
     /// default pass
-    pub const DEFAULT_PASS_BASE: usize = 65537;
+    pub const DEFAULT_BIG_STRIDE: usize = 65537;
 
-    /// default pass, like DEFAULT_PASS_BASE / DEFAULT_PRIORITY.
-    pub const DEFAULT_PASS:      usize = 4096;
+    /// default pass, like DEFAULT_BIG_STRIDE / DEFAULT_PRIORITY.
+    pub const DEFAULT_PASS: usize = Self::DEFAULT_BIG_STRIDE / Self::DEFAULT_PRIORITY;
 
     /// New SchedInfo instance for new process.
     pub fn new()-> Self {
@@ -155,7 +185,7 @@ impl SchedInfo {
             _pass: if prio == Self::DEFAULT_PRIORITY {
                     Self::DEFAULT_PASS
                 } else {
-                    Self::DEFAULT_PASS_BASE / prio
+                    Self::DEFAULT_BIG_STRIDE / prio
                 },
             _stride: 0
         }
@@ -194,7 +224,7 @@ impl SchedInfo {
         self._priority = priority;
         self._pass = match priority {
             Self::DEFAULT_PRIORITY => Self::DEFAULT_PASS,
-            _ => Self::DEFAULT_PASS_BASE / priority,
+            _ => Self::DEFAULT_BIG_STRIDE / priority,
         };
         self
     }
@@ -206,12 +236,51 @@ impl SchedInfo {
     }
 }
 
+impl Ord for Stride {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match self.0.cmp(&other.0) {
+            Ordering::Less    => Ordering::Greater,
+            Ordering::Equal   => Ordering::Equal,
+            Ordering::Greater => Ordering::Less,
+        }
+    }
+}
+
+impl PartialOrd for Stride {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        match self.0.cmp(&other.0) {
+            Ordering::Less    => Some(Ordering::Greater),
+            Ordering::Equal   => Some(Ordering::Equal),
+            Ordering::Greater => Some(Ordering::Less),
+        }
+    }
+}
+
+impl PartialEq for Stride {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.eq(&other.0)
+    }
+}
+
+impl Eq for Stride {
+    fn assert_receiver_is_total_eq(&self) {}
+}
+
+impl Stride {
+    /// Convert this Stride into TCB
+    pub fn into_tcb(&self) -> Arc<TaskControlBlock> {
+        self.1.clone()
+    }
+}
+
 impl TcbStatistics {
     /// Create an enpty task statistics item
     pub fn empty()-> Self {
         Self {
             startup_time: 0,
-            syscall_times: [0; MAX_SYSCALL_NUM]
+            syscall_times: [0; MAX_SYSCALL_NUM],
+            last_activate_time: 0,
+            last_deactivate_time: 0
         }
     }
 
@@ -220,6 +289,18 @@ impl TcbStatistics {
         if self.startup_time == 0 {
             self.startup_time = timer::get_time();
         }
+        self.last_activate_time = timer::get_time();
+    }
+
+    /// React on deactivate
+    pub fn on_deactivate(&mut self) {
+        self.last_deactivate_time = timer::get_time();
+    }
+
+    /// Time between last activate and deactivate
+    pub fn get_last_run_time(&self) -> usize {
+        assert!(self.last_deactivate_time >= self.last_activate_time);
+        self.last_deactivate_time - self.last_activate_time
     }
 
     /// React on syscall
@@ -409,8 +490,21 @@ impl TaskControlBlock {
     /// `Running` and updates scheduling info.
     pub fn on_activate(&self)-> &Self {
         let mut inner = self.inner_exclusive_access();
-        inner.task_status = TaskStatus::Running;
+        inner.on_activate();
         self
+    }
+
+    /// Run on deactivation of this task.
+    pub fn on_deactivate(&self, new_status: TaskStatus)-> &Self {
+        let mut inner = self.inner_exclusive_access();
+        inner.task_status = new_status;
+        inner.on_deactivate();
+        self
+    }
+
+    /// Convert this into stride
+    pub fn into_stride(self: &Arc<Self>) -> Stride {
+        Stride(self.inner_ro_access().sched_info._stride, self.clone())
     }
 }
 
