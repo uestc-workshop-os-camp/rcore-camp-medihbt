@@ -6,6 +6,7 @@ use super::{PhysAddr, PhysPageNum, VirtAddr, VirtPageNum};
 use super::{StepByOne, VPNRange};
 use crate::config::{MEMORY_END, MMIO, PAGE_SIZE, TRAMPOLINE};
 use crate::sync::UPSafeCell;
+use crate::task::get_current_pid;
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -82,6 +83,40 @@ impl MemorySet {
             unsafe {
                 asm!("sfence.vma");
             }
+        }
+    }
+    /// Unmap page range
+    pub fn unmap_range(&mut self, pbegin: VirtPageNum, npages: usize)-> bool {
+        let (index, area) = if let Some(x) = self
+            .areas.iter_mut().enumerate()
+            .find(|(_idx, area)| area.vpn_range.get_start() == pbegin)
+            { x } else { return false; };
+
+        let area_vps = &mut area.vpn_range;
+        let right = area_vps.get_end();
+        let dpages = right.0 - pbegin.0;
+
+        if dpages == npages {
+            let mut area = self.areas.swap_remove(index);
+            area.unmap(&mut self.page_table);
+            drop(area);
+            trace!("Process {}: removed area 0x{:012x}[..0x{:08x}]",
+                   get_current_pid(), pbegin.0, npages);
+            true
+        } else if dpages > npages {
+            let newbegin = VirtPageNum(pbegin.0 + npages);
+            let wasted_vps = VPNRange::new(pbegin, newbegin);
+            *area_vps = VPNRange::new(newbegin, right);
+            for vpn in wasted_vps {
+                area.unmap_one(&mut self.page_table, vpn);
+            }
+            trace!("Process {}: shrinked area 0x{:012x}[..0x{:08x}] rightwards with 0x{:08x} pages",
+                   get_current_pid(), pbegin.0, dpages, npages);
+            true
+        } else {
+            warn!("Process {}: page area 0x{:012x}[..0x{:08x}] overflow, requires 0x{:08x}",
+                  get_current_pid(), pbegin.0, npages, dpages);
+            false
         }
     }
     /// Add a new MapArea into this MemorySet.

@@ -14,6 +14,7 @@ use alloc::sync::{Arc, Weak};
 use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::RefMut;
+use crate::sync::banker::Banker;
 
 /// Process Control Block
 pub struct ProcessControlBlock {
@@ -49,6 +50,10 @@ pub struct ProcessControlBlockInner {
     pub semaphore_list: Vec<Option<Arc<Semaphore>>>,
     /// condvar list
     pub condvar_list: Vec<Option<Arc<Condvar>>>,
+    /// Deadlock test enabled
+    pub trace_deadlock: bool,
+    /// Semaphore banker
+    pub sem_banker: Arc<UPSafeCell<Banker>>,
 }
 
 impl ProcessControlBlockInner {
@@ -119,6 +124,8 @@ impl ProcessControlBlock {
                     mutex_list: Vec::new(),
                     semaphore_list: Vec::new(),
                     condvar_list: Vec::new(),
+                    trace_deadlock: false,
+                    sem_banker: Banker::new_arc_up()
                 })
             },
         });
@@ -245,6 +252,8 @@ impl ProcessControlBlock {
                     mutex_list: Vec::new(),
                     semaphore_list: Vec::new(),
                     condvar_list: Vec::new(),
+                    trace_deadlock: false,
+                    sem_banker: Banker::new_arc_up(),
                 })
             },
         });
@@ -281,5 +290,30 @@ impl ProcessControlBlock {
     /// get pid
     pub fn getpid(&self) -> usize {
         self.pid.0
+    }
+    /// See if dead-lock tracing is enabled.
+    pub fn deadlock_tracing_enabled(&self)-> bool {
+        self.inner.ro_access().trace_deadlock
+    }
+
+    /// Allocate or get a semaphore
+    pub fn new_semaphore(&self, res_count: usize) -> Option<Arc<Semaphore>> {
+        let mut inner = self.inner_exclusive_access();
+        let sem = if let Some(id) = inner.semaphore_list.iter()
+                               .enumerate()
+                               .find(|(_, sem)| sem.is_none())
+                               .map(|(id, _)| id) {
+            let sem = Arc::new(Semaphore::new(res_count, id));
+            inner.semaphore_list[id] = Some(sem.clone());
+            sem
+        } else {
+            let len = inner.semaphore_list.len();
+            let sem = Arc::new(Semaphore::new(res_count, len));
+            inner.semaphore_list.push(Some(sem.clone()));
+            sem
+        };
+        let banker = inner.sem_banker.clone();
+        banker.exclusive_access().setup_resources(sem.sem_id, res_count);
+        Some(sem)
     }
 }

@@ -37,6 +37,7 @@ pub use processor::{
     current_user_token, run_tasks, schedule, take_current_task,
 };
 pub use signal::SignalFlags;
+use task::TaskControlBlockInner;
 pub use task::{TaskControlBlock, TaskStatus};
 
 /// Make current task suspended and switch to the next task
@@ -189,6 +190,35 @@ pub fn check_signals_of_current() -> Option<(i32, &'static str)> {
     let process = current_process();
     let process_inner = process.inner_exclusive_access();
     process_inner.signals.check_error()
+}
+
+/// Read current TCB with function readf().
+pub fn read_current_tcb<RetT>(readf: impl FnOnce(&ProcessControlBlock, &TaskControlBlockInner)-> RetT)-> RetT
+{
+    let tcb = current_task().unwrap();
+    let pcb = tcb.process.upgrade().unwrap();
+    trace!("Process {} borrowed itself", pcb.pid.0);
+    let rtcb = tcb.inner_exclusive_access();
+    let ret = readf(&pcb, rtcb.deref());
+    trace!("Process {} released itself", pcb.pid.0);
+    ret
+}
+
+/// Get current PID
+pub fn get_current_pid()-> usize {
+    current_task().unwrap().process.upgrade().unwrap().pid.0
+}
+
+/// Update current TCB with function updatef().
+pub fn update_current_tcb<RetT>(updatef: impl FnOnce(&ProcessControlBlock, &mut TaskControlBlockInner)->RetT)-> RetT
+{
+    let tcb = current_task().unwrap();
+    let pcb = tcb.process.upgrade().unwrap();
+    trace!("Process {} borrowed itself (mut)", pcb.pid.0);
+    let mut rtcb = tcb.inner_exclusive_access();
+    let ret = updatef(&pcb, &mut rtcb);
+    trace!("Process {} released itself (mut)", pcb.pid.0);
+    ret
 }
 
 /// Add signal to the current task

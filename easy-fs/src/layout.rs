@@ -102,6 +102,10 @@ pub struct DiskInode {
     pub indirect2: u32,
     /// inode type
     type_: DiskInodeType,
+    /// padding(0)
+    _padding_dummy0_: u8,
+    /// reference count
+    refcount_: u16,
 }
 
 impl DiskInode {
@@ -113,6 +117,31 @@ impl DiskInode {
         self.indirect2 = 0;
         self.type_ = type_;
     }
+    /// Reference Count
+    #[allow(unused)]
+    pub fn get_ref_count(&self)-> u16 {
+        self.refcount_
+    }
+    /// Increase reference count and return this
+    #[allow(unused)]
+    pub fn refthis(&mut self)-> &mut Self {
+        self.refcount_ += 1;
+        self
+    }
+    /// Decrease reference count.
+    /// returns if this inode is still alive.
+    #[allow(unused)]
+    pub fn unref(&mut self)-> bool {
+        assert_ne!(self.refcount_, 0, "Disk Inode double free");
+        self.refcount_ -= 1;
+        self.refcount_ != 0u16
+    }
+    /// Check if this Disk Inode is valid
+    #[allow(unused)]
+    pub fn is_valid(&self)-> bool {
+        self.refcount_ != 0
+    }
+
     /// inode is directory?
     pub fn is_dir(&self) -> bool {
         self.type_ == DiskInodeType::Directory
@@ -150,6 +179,11 @@ impl DiskInode {
     pub fn blocks_num_needed(&self, new_size: u32) -> u32 {
         assert!(new_size >= self.size);
         Self::total_blocks(new_size) - Self::total_blocks(self.size)
+    }
+    /// Get the number of data blocks that have to be DEallocated given to the new size of data
+    pub fn blocks_num_deallocated(&self, new_size: u32)-> u32 {
+        assert!(new_size <= self.size);
+        Self::total_blocks(self.size) - Self::total_blocks(new_size)
     }
     /// block id of the start block corresponding to the file offset for read_at/write_at.
     pub fn get_block_id(&self, inner_id: u32, block_device: &Arc<dyn BlockDevice>) -> u32 {
@@ -323,6 +357,14 @@ impl DiskInode {
             });
         self.indirect2 = 0;
         v
+    }
+    /// List block-id to deallocate and truncate this file to `new_bytes`.
+    pub fn dealloc_to(&mut self, new_bytes: u32, _block_device: &Arc<dyn BlockDevice>) -> Vec<u32>
+    {
+        assert!(new_bytes <= self.size);
+        let ret = Vec::new();
+        self.size = new_bytes;
+        ret
     }
     /// Read file data at offset position from inode into buf
     pub fn read_at(
