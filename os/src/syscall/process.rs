@@ -1,11 +1,8 @@
 use crate::{
-    config::MAX_SYSCALL_NUM,
-    fs::{open_file, OpenFlags},
-    mm::{translated_ref, translated_refmut, translated_str},
-    task::{
+    board::CLOCK_FREQ, config::MAX_SYSCALL_NUM, fs::{open_file, OpenFlags}, mm::{translated_ref, translated_refmut, translated_str, utils::copy_obj_to_user}, task::{
         current_process, current_task, current_user_token, exit_current_and_run_next, pid2process,
         suspend_current_and_run_next, SignalFlags, TaskStatus,
-    },
+    }
 };
 use alloc::{string::String, sync::Arc, vec::Vec};
 
@@ -163,11 +160,15 @@ pub fn sys_kill(pid: usize, signal: u32) -> isize {
 /// HINT: You might reimplement it with virtual memory management.
 /// HINT: What if [`TimeVal`] is splitted by two pages ?
 pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_get_time NOT IMPLEMENTED",
-        current_task().unwrap().process.upgrade().unwrap().getpid()
-    );
-    -1
+    trace!("kernel:pid[{}] sys_get_time", current_process().pid.0);
+    let time = crate::timer::get_time();
+    unsafe {
+        copy_obj_to_user(_ts, &TimeVal {
+            sec: time / CLOCK_FREQ,
+            usec: (time * 1000_000 / CLOCK_FREQ) % 1000_000
+        });
+    }
+    0
 }
 
 /// task_info syscall
