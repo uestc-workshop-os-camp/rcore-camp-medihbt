@@ -414,38 +414,6 @@ impl TaskControlBlock {
     }
 }
 
-#[derive(Clone)]
-/// Ordered scheduling task
-pub struct SchedOrdTask(Arc<TaskControlBlock>);
-
-impl PartialOrd for SchedOrdTask {
-    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
-        let l_prio = self.0.inner_exclusive_access().sched_info.get_stride();
-        let r_prio = other.0.inner_exclusive_access().sched_info.get_stride();
-        l_prio.partial_cmp(&r_prio)
-    }
-}
-
-impl PartialEq for SchedOrdTask {
-    fn eq(&self, other: &Self) -> bool {
-        let l_prio = self.0.inner_exclusive_access().sched_info.get_stride();
-        let r_prio = other.0.inner_exclusive_access().sched_info.get_stride();
-        l_prio == r_prio
-    }
-}
-
-impl Into<Arc<TaskControlBlock>> for SchedOrdTask {
-    fn into(self) -> Arc<TaskControlBlock> {
-        self.0
-    }
-}
-
-impl From<Arc<TaskControlBlock>> for SchedOrdTask {
-    fn from(value: Arc<TaskControlBlock>) -> Self {
-        Self(value)
-    }
-}
-
 #[derive(Copy, Clone, PartialEq)]
 /// task status: UnInit, Ready, Running, Exited
 pub enum TaskStatus {
